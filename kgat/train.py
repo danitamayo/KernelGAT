@@ -65,33 +65,44 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
     #                       lr=args.learning_rate)
     global_step = 0
     for epoch in range(int(args.num_train_epochs)):
+        global_step = 0
+        running_loss = 0
+        
         model.train()
         optimizer.zero_grad()
         for index, data in enumerate(trainset_reader):
             inputs, lab_tensor = data
             prob = model(inputs)
+
             loss = F.nll_loss(prob, lab_tensor)
+ 
             running_loss += loss.item()
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
             loss.backward()
+            
+            
             global_step += 1
             if global_step % args.gradient_accumulation_steps == 0:
+                # ------------- Start New Code ---------------
+                # # Clip the gradient norm using nn.utils.clip_grad_norm_()
+                nn.utils.clip_grad_norm_(model.parameters(), 0.01)
+                # ------------- End New Code ---------------
                 optimizer.step()
                 optimizer.zero_grad()
                 logger.info('Epoch: {0}, Step: {1}, Loss: {2}'.format(epoch, global_step, (running_loss / global_step)))
-            if global_step % (args.eval_step * args.gradient_accumulation_steps) == 0:
-                logger.info('Start eval!')
-                with torch.no_grad():
-                    dev_accuracy = eval_model(model, validset_reader)
-                    logger.info('Dev total acc: {0}'.format(dev_accuracy))
-                    if dev_accuracy > best_accuracy:
-                        best_accuracy = dev_accuracy
+            # if global_step % (args.eval_step * args.gradient_accumulation_steps) == 0:
+        logger.info('Start eval!')
+        with torch.no_grad():
+            dev_accuracy = eval_model(model, validset_reader)
+            logger.info('Dev total acc: {0}'.format(dev_accuracy))
+            if dev_accuracy > best_accuracy:
+                best_accuracy = dev_accuracy
 
-                        torch.save({'epoch': epoch,
-                                    'model': ori_model.state_dict(),
-                                    'best_accuracy': best_accuracy}, save_path + ".best.pt")
-                        logger.info("Saved best epoch {0}, best accuracy {1}".format(epoch, best_accuracy))
+                torch.save({'epoch': epoch,
+                            'model': ori_model.state_dict(),
+                            'best_accuracy': best_accuracy}, save_path + f"clipping{epoch+3}.best.pt")
+                logger.info("Saved best epoch {0}, best accuracy {1}".format(epoch, best_accuracy))
 
 
 
@@ -116,7 +127,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_len", default=130, type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. Sequences "
                              "longer than this will be truncated, and sequences shorter than this will be padded.")
-    parser.add_argument("--eval_step", default=500, type=int,
+    parser.add_argument("--eval_step", default=2000, type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. Sequences "
                              "longer than this will be truncated, and sequences shorter than this will be padded.")
     parser.add_argument('--bert_pretrain', required=True)
@@ -158,7 +169,50 @@ if __name__ == "__main__":
         pretrained_dict = torch.load(args.postpretrain)['model']
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
         model_dict.update(pretrained_dict)
+
+    # --------------- START NEW CODE --------------------
+    
+    # We need to use a dictionary to transfer learning from the original model to our model
+    new_dict = {"proj_gat.0.weight":"proj_gat[0].weight",
+              "proj_gat.0.bias":"proj_gat[0].bias",
+              "proj_gat.2.weight":"proj_gat[2].weight",
+              "proj_gat.2.bias":"proj_gat[2].bias"}
+              
     ori_model = inference_model(bert_model, args)
-    model = nn.DataParallel(ori_model)
-    model = model.cuda()
-    train_model(model, ori_model, args, trainset_reader, validset_reader)
+    flag = False
+    for layer_name, params in ori_model.named_parameters():
+        if "pred_model.bert.encoder.layer" in layer_name:
+            if layer_name[30:32]=="10" or flag:
+                new_name = layer_name[:29]+f"[{layer_name[30:32]}]"+layer_name[32:]
+                new_dict[layer_name] = new_name
+                flag = True
+            else:
+                new_name = layer_name[:29]+f"[{layer_name[30]}]"+layer_name[31:]
+                new_dict[layer_name] = new_name
+                
+
+    # We set in which device we will put the matrices
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    trained_model = torch.load("../checkpoint/kgat/modelepoch2.best.pt", map_location=device)
+    
+    # We transfer learning from the model of the paper
+    for name,params in ori_model.named_parameters():
+        if "pred_model.bert.encoder.layer" in name:
+            params.requires_grad = False
+        if name in trained_model["model"].keys():
+            layer = trained_model["model"][name]
+            layer = torch.nn.Parameter(layer)
+    
+            if name in new_dict.keys():
+
+                name = new_dict[name]
+            
+            exec("ori_model." + name + " = layer")
+        
+        
+    # --------------- END NEW CODE --------------------
+    
+    print("Success")
+    # model = nn.DataParallel(ori_model)
+    # model = model.cuda()
+    train_model(ori_model, ori_model, args, trainset_reader, validset_reader)

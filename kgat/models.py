@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from torch.nn import BatchNorm1d, Linear, ReLU
 from bert_model import BertForSequenceEncoder
+from torch.nn.utils import clip_grad_norm_
 from torch.autograd import Variable
 import numpy as np
 
@@ -65,7 +66,13 @@ class inference_model(nn.Module):
         self.proj_select = nn.Linear(self.kernel, 1)
         self.mu = Variable(torch.FloatTensor(kernal_mus(self.kernel)), requires_grad = False).view(1, 1, 1, 21).cuda()
         self.sigma = Variable(torch.FloatTensor(kernel_sigmas(self.kernel)), requires_grad = False).view(1, 1, 1, 21).cuda()
-
+        
+        # --------------- Start NEW CODE --------------------
+        # We initialise the parameters here:
+        self.gammas = nn.Parameter(torch.Tensor(self.kernel).view(1, 1, 1, 21), requires_grad = True).cuda()
+        self.ds = nn.Parameter(torch.Tensor(self.kernel).view(1,1,1,21), requires_grad = True).cuda()
+        self.weights = nn.Parameter(torch.rand(self.kernel*2).view(1,1,1,21,2), requires_grad = True).cuda()
+        # --------------- End NEW CODE --------------------
 
     def self_attention(self, inputs, inputs_hiddens, mask, mask_evidence, index):
         idx = torch.LongTensor([index]).cuda()
@@ -84,9 +91,7 @@ class inference_model(nn.Module):
         att_score = self.get_intersect_matrix_att(hiddens_norm.view(-1, self.max_len, self.bert_hidden_dim), own_norm.view(-1, self.max_len, self.bert_hidden_dim),
                                                   mask_evidence.view(-1, self.max_len), own_mask.view(-1, self.max_len))
         att_score = att_score.view(-1, self.evi_num, self.max_len, 1)
-        #if index == 1:
-        #    for i in range(self.evi_num):
-        #print (att_score.view(-1, self.evi_num, self.max_len)[0, 1, :])
+
         denoise_inputs = torch.sum(att_score * inputs_hiddens, 2)
         weight_inp = torch.cat([own_input, inputs], -1)
         weight_inp = self.proj_gat(weight_inp)
@@ -102,8 +107,24 @@ class inference_model(nn.Module):
         attn_q = attn_q.view(attn_q.size()[0], attn_q.size()[1], 1)
         attn_d = attn_d.view(attn_d.size()[0], 1, attn_d.size()[1], 1)
         sim = torch.bmm(q_embed, torch.transpose(d_embed, 1, 2)).view(q_embed.size()[0], q_embed.size()[1], d_embed.size()[1], 1)
-        pooling_value = torch.exp((- ((sim - self.mu.cuda()) ** 2) / (self.sigma.cuda() ** 2) / 2)) * attn_d
+
+        # --------------- Start NEW CODE --------------------
+        # We compute the two kernels:
+        pooling_value_1 = torch.exp((- ((sim - self.mu.cuda()) ** 2) / (self.sigma.cuda() ** 2) / 2)) * attn_d        
+        pooling_value_2 = torch.pow((torch.abs(self.gammas*sim)),(torch.abs(self.ds)+1))
+        
+        # We only want positive weights
+        weights = torch.abs(self.weights.cuda())
+
+        # We apply normalization
+        weights = F.normalize(weights, p=1, dim=-1).cuda()
+
+        # We compute the multi kernel
+        pooling_value = weights[:,:,:,:,0] * pooling_value_1 + weights[:,:,:,:,1] * pooling_value_2
+        # --------------- End NEW CODE --------------------
+
         pooling_sum = torch.sum(pooling_value, 2)
+        
         log_pooling_sum = torch.log(torch.clamp(pooling_sum, min=1e-10)) * attn_q
         log_pooling_sum = torch.sum(log_pooling_sum, 1) / (torch.sum(attn_q, 1) + 1e-10)
         log_pooling_sum = self.proj_select(log_pooling_sum).view([-1, 1])
@@ -113,7 +134,21 @@ class inference_model(nn.Module):
         attn_q = attn_q.view(attn_q.size()[0], attn_q.size()[1])
         attn_d = attn_d.view(attn_d.size()[0], 1, attn_d.size()[1], 1)
         sim = torch.bmm(q_embed, torch.transpose(d_embed, 1, 2)).view(q_embed.size()[0], q_embed.size()[1], d_embed.size()[1], 1)
-        pooling_value = torch.exp((- ((sim - self.mu.cuda()) ** 2) / (self.sigma.cuda() ** 2) / 2)) * attn_d
+
+        # --------------- Start NEW CODE --------------------
+        # We compute the two kernels:
+        pooling_value_1 = torch.exp((- ((sim - self.mu.cuda()) ** 2) / (self.sigma.cuda() ** 2) / 2)) * attn_d
+        pooling_value_2 = torch.pow((torch.abs(self.gammas*sim)),(torch.abs(self.ds)+1))
+
+        # We only want positive weights
+        weights = torch.abs(self.weights)
+
+        # We apply normalization
+        weights = F.normalize(weights, p=1, dim=-1)
+
+        # We compute the multi kernel
+        pooling_value = weights[:,:,:,:,0] * pooling_value_1 + weights[:,:,:,:,1] * pooling_value_2
+        # --------------- NEW CODE --------------------
         log_pooling_sum = torch.sum(pooling_value, 2)
         log_pooling_sum = torch.log(torch.clamp(log_pooling_sum, min=1e-10))
         log_pooling_sum = self.proj_att(log_pooling_sum).squeeze(-1)
@@ -150,25 +185,5 @@ class inference_model(nn.Module):
         class_prob = F.softmax(inference_feature, dim=2)
         prob = torch.sum(select_prob * class_prob, 1)
         prob = torch.log(prob)
+        
         return prob
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
