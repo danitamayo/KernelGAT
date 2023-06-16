@@ -53,10 +53,13 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
 
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    extra_decay = ['weights','gammas','ds']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if n in extra_decay], 'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and n not in extra_decay], 'weight_decay': 0.01},
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
+    print([n for n, p in param_optimizer if not any(nd in n for nd in no_decay)])
     optimizer = BertAdam(optimizer_grouped_parameters,
                          lr=args.learning_rate,
                          warmup=args.warmup_proportion,
@@ -64,6 +67,9 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
     #optimizer = optim.Adam(model.parameters(),
     #                       lr=args.learning_rate)
     global_step = 0
+
+    with torch.no_grad():
+        print("Original baseline accuracy: ",eval_model(model, validset_reader))
     for epoch in range(int(args.num_train_epochs)):
         global_step = 0
         running_loss = 0
@@ -71,6 +77,7 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
         model.train()
         optimizer.zero_grad()
         for index, data in enumerate(trainset_reader):
+            # print(model.gammas)
             inputs, lab_tensor = data
             prob = model(inputs)
 
@@ -86,11 +93,12 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
             if global_step % args.gradient_accumulation_steps == 0:
                 # ------------- Start New Code ---------------
                 # # Clip the gradient norm using nn.utils.clip_grad_norm_()
-                nn.utils.clip_grad_norm_(model.parameters(), 0.01)
+                # nn.utils.clip_grad_norm_(model.parameters(), 0.01)
                 # ------------- End New Code ---------------
                 optimizer.step()
                 optimizer.zero_grad()
                 logger.info('Epoch: {0}, Step: {1}, Loss: {2}'.format(epoch, global_step, (running_loss / global_step)))
+                # print(model.weights,model.gammas,model.ds)
             # if global_step % (args.eval_step * args.gradient_accumulation_steps) == 0:
         logger.info('Start eval!')
         with torch.no_grad():
@@ -101,7 +109,7 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
 
                 torch.save({'epoch': epoch,
                             'model': ori_model.state_dict(),
-                            'best_accuracy': best_accuracy}, save_path + f"clipping{epoch+3}.best.pt")
+                            'best_accuracy': best_accuracy}, save_path + f"new_weights{epoch+3}.best.pt")
                 logger.info("Saved best epoch {0}, best accuracy {1}".format(epoch, best_accuracy))
 
 
@@ -193,26 +201,16 @@ if __name__ == "__main__":
 
     # We set in which device we will put the matrices
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    trained_model = torch.load("../checkpoint/kgat/modelepoch2.best.pt", map_location=device)
-    
-    # We transfer learning from the model of the paper
-    for name,params in ori_model.named_parameters():
-        if "pred_model.bert.encoder.layer" in name:
-            params.requires_grad = False
-        if name in trained_model["model"].keys():
-            layer = trained_model["model"][name]
-            layer = torch.nn.Parameter(layer)
-    
-            if name in new_dict.keys():
-
-                name = new_dict[name]
-            
-            exec("ori_model." + name + " = layer")
-        
+    # trained_model = torch.load("../checkpoint/kgat/model.best.pt", map_location=device)
+    trained_model = torch.load("../checkpoint/kgat/modelnew_weights2.best.pt", map_location=device)
+    if "ds" in trained_model["model"]:
+        del trained_model["model"]["ds"]
+    ori_model.load_state_dict(trained_model["model"])
         
     # --------------- END NEW CODE --------------------
     
     print("Success")
+    ori_model = ori_model.to(torch.device("cuda"))
     # model = nn.DataParallel(ori_model)
-    # model = model.cuda()
+    # model = model.to(torch.device("cuda"))
     train_model(ori_model, ori_model, args, trainset_reader, validset_reader)
