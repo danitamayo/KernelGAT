@@ -109,7 +109,7 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
 
                 torch.save({'epoch': epoch,
                             'model': ori_model.state_dict(),
-                            'best_accuracy': best_accuracy}, save_path + f"new_weights{epoch+3}.best.pt")
+                            'best_accuracy': best_accuracy}, save_path + f"model_approach2_epoch{epoch+3}.best.pt")
                 logger.info("Saved best epoch {0}, best accuracy {1}".format(epoch, best_accuracy))
 
 
@@ -201,16 +201,29 @@ if __name__ == "__main__":
 
     # We set in which device we will put the matrices
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # trained_model = torch.load("../checkpoint/kgat/model.best.pt", map_location=device)
-    trained_model = torch.load("../checkpoint/kgat/modelnew_weights2.best.pt", map_location=device)
-    if "ds" in trained_model["model"]:
-        del trained_model["model"]["ds"]
-    ori_model.load_state_dict(trained_model["model"])
+    trained_model = torch.load("../checkpoint/kgat/model.best.pt", map_location=device)
+    
+    for name,params in ori_model.named_parameters():
+        print(name)
+        if "pred_model.bert.encoder.layer" in name:
+            params.requires_grad = False
+        if name in trained_model["model"].keys():
+            layer = trained_model["model"][name]
+            layer = torch.nn.Parameter(layer)
+
+            if name in new_dict.keys():
+
+                name = new_dict[name]
+
+            exec("ori_model." + name + " = layer")
         
     # --------------- END NEW CODE --------------------
     
     print("Success")
     ori_model = ori_model.to(torch.device("cuda"))
+    
+    # Thankfully, we don't need to parallelise
     # model = nn.DataParallel(ori_model)
     # model = model.to(torch.device("cuda"))
+
     train_model(ori_model, ori_model, args, trainset_reader, validset_reader)
