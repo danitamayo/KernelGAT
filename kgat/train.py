@@ -68,8 +68,11 @@ def train_model(model, ori_model, args, trainset_reader, validset_reader):
     #                       lr=args.learning_rate)
     global_step = 0
 
-    with torch.no_grad():
-        print("Original baseline accuracy: ",eval_model(model, validset_reader))
+    # with torch.no_grad():
+    #     print("Original baseline accuracy: ",eval_model(model, validset_reader))
+    # This part of the code was used to see the baseline accuracy. However, if you uncomment it, you will be looking at the performance of a model
+    # with the baseline weights and the initialization of the quadratic kernel given by default in the apporach 2
+    
     for epoch in range(int(args.num_train_epochs)):
         global_step = 0
         running_loss = 0
